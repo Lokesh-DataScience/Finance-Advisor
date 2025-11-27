@@ -1,25 +1,20 @@
-# virtualenv
-venv/
-.env/
-.venv/
-# Python cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-# VSCode settings
-.vscode/
-# macOS files
-.DS_Store
-# Logs
-*.log
+*$py.class
+
 # Distribution / packaging
 build/
 dist/
 *.egg-info/
-# IDE files
-.idea/
-*.iml
-# Test coverage
-htmlcov/
-.coverage
+
+# Environments
+.env
+venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Data and model artifacts
+data/
+models/
