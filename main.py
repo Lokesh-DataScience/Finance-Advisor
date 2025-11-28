@@ -7,8 +7,53 @@ import runpy
 import sys
 import traceback
 from pathlib import Path
-
+from dotenv import load_dotenv
 from src.utils import PDFtoCSV, generate_weekly_summary, generate_monthly_summary
+load_dotenv()
+
+def ensure_amount_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure the DataFrame has a numeric 'Amount' column.
+
+    Handles common patterns: existing 'Amount', separate 'Debit'/'Credit',
+    single 'Debit' or 'Credit', or alt names like 'Value'/'Amt'. Falls back to 0.0.
+    Returns a copy of the DataFrame with 'Amount' present.
+    """
+    df = df.copy()
+    if 'Amount' in df.columns:
+        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+        return df
+
+    # Debit/Credit pair
+    if 'Debit' in df.columns and 'Credit' in df.columns:
+        df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
+        df['Credit'] = pd.to_numeric(df['Credit'], errors='coerce').fillna(0)
+        df['Amount'] = df['Credit'] - df['Debit']
+        return df
+
+    # Single-column alternatives
+    alt = next((c for c in df.columns if c.lower() in ('value', 'amt', 'transaction_amount', 'amount_usd', 'amount(usd)')), None)
+    if alt:
+        # remove common currency formatting
+        try:
+            df[alt] = df[alt].astype(str).str.replace(r'[\$,()]', '', regex=True)
+        except Exception:
+            pass
+        df['Amount'] = pd.to_numeric(df[alt], errors='coerce').fillna(0)
+        return df
+
+    # If only Debit present, treat as negative outflow
+    if 'Debit' in df.columns:
+        df['Amount'] = -pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
+        return df
+
+    # If only Credit present
+    if 'Credit' in df.columns:
+        df['Amount'] = pd.to_numeric(df['Credit'], errors='coerce').fillna(0)
+        return df
+
+    # Last resort: add zero Amount column
+    df['Amount'] = 0.0
+    return df
 
 
 def load_script_function(script_path: Path, func_name: str = "main"):
@@ -168,51 +213,137 @@ elif tool == "Analytics Engine":
 
 elif tool == "Anomaly Detector":
     st.header("🚨 Simple Anomaly Detection")
+    
     if "df" not in st.session_state:
         st.info("No data available — convert a PDF first.")
     else:
-        df = st.session_state['df'].copy()
-        method = st.selectbox("Method", ["z-score", "absolute_threshold"])
-        if method == 'z-score':
+        
+        df = ensure_amount_column(st.session_state['df'])
+        method = st.selectbox("Method", ["model", "z-score", "absolute_threshold"])
+
+        anomalies = None
+        if method == 'model':
+            st.info("Using saved IsolationForest model (or will train if missing).")
+            model_path = st.text_input("Model path", value="models/anomaly_model.pkl")
+            if st.button("Run model-based detection"):
+                with st.spinner("Running model-based anomaly detection..."):
+                    try:
+                        # Use the script wrapper function if available
+                        try:
+                            res = run_script("scripts/03_anomaly_detector.py", "detect_anomalies", df, str(model_path), True)
+                            # script wrapper returns a DataFrame
+                            if isinstance(res, pd.DataFrame):
+                                anomalies = res
+                            elif isinstance(res, dict) and "df" in res:
+                                anomalies = res["df"]
+                            else:
+                                # If run_script executed module without returning, try importing directly
+                                import importlib.util
+                                spec = importlib.util.spec_from_file_location("anomaly_module", str(Path.cwd() / "scripts" / "03_anomaly_detector.py"))
+                                mod = importlib.util.module_from_spec(spec)
+                                spec.loader.exec_module(mod)
+                                anomalies = mod.detect_anomalies(df, model_path=str(model_path), train_if_missing=True)
+                        except Exception:
+                            # fallback: attempt to run module in new namespace (train & detect)
+                            ns = run_script("scripts/03_anomaly_detector.py")
+                            # If module registered a wrapper in globals, try to call it
+                            try:
+                                anomalies = ns.get('detect_anomalies', lambda *a, **k: None)(df, model_path=str(model_path), train_if_missing=True)
+                            except Exception:
+                                anomalies = None
+
+                    except Exception as e:
+                        st.error(f"Model detection failed: {e}")
+
+        elif method == 'z-score':
             thresh = st.slider('Z-score threshold', 2.0, 6.0, 3.0)
-            df['z'] = (df['Amount'] - df['Amount'].mean()) / df['Amount'].std()
-            anomalies = df[df['z'].abs() > thresh]
-        else:
+            if 'Amount' in df.columns:
+                df['z'] = (df['Amount'] - df['Amount'].mean()) / df['Amount'].std()
+                anomalies = df[df['z'].abs() > thresh]
+            else:
+                st.error("No 'Amount' column found for z-score method.")
+
+        else:  # absolute_threshold
             thresh = st.number_input('Absolute amount threshold', value=10000.0)
-            anomalies = df[df['Amount'].abs() > thresh]
+            if 'Amount' in df.columns:
+                anomalies = df[df['Amount'].abs() > thresh]
+            else:
+                st.error("No 'Amount' column found for absolute threshold method.")
 
         st.subheader('Anomalies')
-        st.write(f'Found {len(anomalies)} anomalous transactions')
-        st.dataframe(anomalies)
+        if anomalies is None:
+            st.write('No anomalies computed yet — choose a method and run detection.')
+        else:
+            st.write(f'Found {len(anomalies)} anomalous transactions')
+            st.dataframe(anomalies)
 
 
 elif tool == "LLM Advisor":
-    st.header("🤖 LLM Advisor (local script or placeholder)")
-    prompt = st.text_area("Ask a finance question about the statement (e.g., 'Where did I spend most?')")
+    st.header("🤖 LLM Advisor (AI-powered finance insights)")
+    prompt = st.text_area("Ask a finance question about the statement (e.g., 'Where did I spend most?')", value="Analyze my spending and provide recommendations.")
     llm_script = Path('scripts') / '04_llm_advisor.py'
-    if st.button("Get advice"):
-        with st.spinner('Running advisor...'):
-            try:
-                if llm_script.exists():
-                    # try to call a function `answer` or `main`
-                    try:
-                        res = run_script(str(llm_script), 'answer', prompt, st.session_state.get('df', None))
-                        st.write(res)
-                    except Exception:
-                        run_script(str(llm_script))
-                        st.success('Advisor script executed')
-                else:
-                    # Simple heuristic advisor fallback
-                    df = st.session_state.get('df')
-                    if df is None:
-                        st.info('Upload a statement first or provide more context in the prompt.')
+    
+    if "df" not in st.session_state:
+        st.info("No data available — convert a PDF first.")
+    else:
+        if st.button("Get advice"):
+            with st.spinner('Analyzing statement and generating advice...'):
+                try:
+                    # Pass the actual DataFrame from session state to the answer function
+                    df_for_advisor = ensure_amount_column(st.session_state['df'])
+                    
+                    if llm_script.exists():
+                        try:
+                            # Call answer with prompt and dataframe
+                            res = run_script(str(llm_script), 'answer', prompt, df_for_advisor)
+                            
+                            # Display result
+                            if isinstance(res, dict):
+                                st.subheader("💡 Advice")
+                                
+                                # Show raw response
+                                if res.get('raw'):
+                                    st.markdown(res['raw'])
+                                
+                                # If parsed JSON available, show structured view
+                                if res.get('parsed'):
+                                    parsed = res['parsed']
+                                    if 'summary' in parsed:
+                                        st.subheader("Summary")
+                                        st.write(parsed['summary'])
+                                    if 'recommendations' in parsed:
+                                        st.subheader("Recommendations")
+                                        for i, rec in enumerate(parsed['recommendations'], 1):
+                                            st.write(f"{i}. {rec}")
+                                    if 'warnings' in parsed:
+                                        st.subheader("⚠️ Warnings")
+                                        for w in parsed['warnings']:
+                                            st.warning(w)
+                                    if 'habit_tip' in parsed:
+                                        st.subheader("💪 Habit Tip")
+                                        st.write(parsed['habit_tip'])
+                            else:
+                                st.write(res)
+                        except Exception as e:
+                            st.error(f"Script execution error: {e}")
                     else:
-                        # simple answer examples
-                        top = df.groupby('Details')['Amount'].sum().sort_values().head(5)
-                        st.write('Top 5 spending descriptions (by negative net amount):')
-                        st.dataframe(top)
-            except Exception as e:
-                st.error(f'Advisor failed: {e}')
+                        # Fallback: direct import and call
+                        try:
+                            import importlib.util
+                            spec = importlib.util.spec_from_file_location("llm_advisor_module", str(llm_script))
+                            mod = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(mod)
+                            res = mod.answer(prompt, df_for_advisor)
+                            st.subheader("💡 Advice")
+                            if isinstance(res, dict) and res.get('raw'):
+                                st.markdown(res['raw'])
+                            else:
+                                st.write(res)
+                        except Exception as e:
+                            st.error(f"Advisor error: {e}")
+                            
+                except Exception as e:
+                    st.error(f'Advisor failed: {e}')
 
 
 elif tool == "Training":

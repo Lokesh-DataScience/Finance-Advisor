@@ -261,33 +261,78 @@ def answer(prompt: str, df=None, backend_callable=None):
     if df is not None and pd is not None:
         try:
             df2 = df.copy()
-            df2['Amount'] = pd.to_numeric(df2.get('Amount') if 'Amount' in df2 else (df2.get('Credit', 0) - df2.get('Debit', 0)), errors='coerce').fillna(0)
-            monthly_spending = df2['Amount'].abs().sum()
-            inflow = df2.loc[df2['Amount'] > 0, 'Amount'].sum()
-            savings = inflow - df2.loc[df2['Amount'] < 0, 'Amount'].abs().sum()
+            
+            # Compute Amount column safely
+            if 'Amount' in df2.columns:
+                df2['Amount'] = pd.to_numeric(df2['Amount'], errors='coerce').fillna(0)
+            elif 'Credit' in df2.columns and 'Debit' in df2.columns:
+                df2['Credit'] = pd.to_numeric(df2['Credit'], errors='coerce').fillna(0)
+                df2['Debit'] = pd.to_numeric(df2['Debit'], errors='coerce').fillna(0)
+                df2['Amount'] = df2['Credit'] - df2['Debit']
+            elif 'Credit' in df2.columns:
+                df2['Amount'] = pd.to_numeric(df2['Credit'], errors='coerce').fillna(0)
+            elif 'Debit' in df2.columns:
+                df2['Amount'] = -pd.to_numeric(df2['Debit'], errors='coerce').fillna(0)
+            else:
+                df2['Amount'] = 0.0
+            
+            # Calculate metrics
+            total_spending = df2.loc[df2['Amount'] < 0, 'Amount'].sum()
+            total_inflow = df2.loc[df2['Amount'] > 0, 'Amount'].sum()
+            net_savings = total_inflow + total_spending  # spending is negative
+            
+            # Top merchants by absolute spending
             top_merchants = []
             if 'Details' in df2.columns:
-                top = df2.groupby('Details')['Amount'].sum().abs().sort_values(ascending=False).head(5)
-                top_merchants = list(zip(top.index.tolist(), top.values.tolist()))
-
+                top = df2[df2['Amount'] < 0].groupby('Details')['Amount'].sum().sort_values().head(10)  # most negative first
+                top_merchants = [(m, abs(a)) for m, a in zip(top.index.tolist(), top.values.tolist())]
+            
+            # Compute unusual/anomalies
+            unusual = []
+            if len(df2) > 0:
+                amounts = df2[df2['Amount'] < 0]['Amount'].abs()
+                if len(amounts) > 0:
+                    mean_amt = amounts.mean()
+                    std_amt = amounts.std()
+                    if std_amt > 0:
+                        threshold = mean_amt + (2 * std_amt)
+                        unusual_rows = df2[(df2['Amount'] < 0) & (df2['Amount'].abs() > threshold)]
+                        for idx, row in unusual_rows.iterrows():
+                            detail = row.get('Details', 'Unknown')
+                            amt = abs(row['Amount'])
+                            unusual.append({'merchant': detail, 'amount': float(amt), 'note': 'Anomaly detected'})
+            
             metrics = {
-                'monthly_spending': float(monthly_spending),
-                'inflow': float(inflow),
-                'savings': float(savings),
+                'monthly_spending': float(abs(total_spending)),
+                'inflow': float(total_inflow),
+                'savings': float(net_savings),
                 'top_merchants': top_merchants,
-                'category_totals': {}
+                'unusual_spends': unusual[:5],
+                'category_totals': {},
+                'extra_context': prompt
             }
-        except Exception:
-            metrics = {}
+        except Exception as e:
+            metrics = {'extra_context': prompt, 'note': f'Error computing metrics: {str(e)}'}
 
     # If no backend provided or Groq unavailable, return heuristic reply
     try:
         advisor = LLMAdvisor(backend='groq')
         return advisor.get_advice(metrics, backend_callable=backend_callable)
-    except Exception:
-        # fallback simple reply
+    except Exception as e:
+        # fallback: if Groq not available, provide simple text summary
+        if metrics and 'monthly_spending' in metrics:
+            top_m = metrics.get('top_merchants', [])
+            top_str = '; '.join([f"{m}: ₹{a:,.0f}" for m, a in top_m[:3]])
+            fallback_text = (
+                f"Based on your statement: You spent ₹{metrics['monthly_spending']:,.0f} this month. "
+                f"Your inflow was ₹{metrics['inflow']:,.0f}. Top spending: {top_str}. "
+                f"To get AI-powered recommendations, set up GROQ_API_KEY environment variable."
+            )
+        else:
+            fallback_text = f"Heuristic reply: Could not analyze statement data. Error: {str(e)}"
+        
         return {
-            'raw': f"Heuristic reply: prompt received ({prompt[:120]}). Metrics computed: {list(metrics.keys())}",
+            'raw': fallback_text,
             'parsed': None
         }
 
