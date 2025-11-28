@@ -1,20 +1,28 @@
-# Byte-compiled / optimized / DLL files
+# virtualenv
+venv/
+.env/
+.venv/
+# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+# VSCode settings
+.vscode/
+# macOS files
+.DS_Store
+# Logs
+*.log
 # Distribution / packaging
 build/
 dist/
 *.egg-info/
+# IDE files
+.idea/
+*.iml
+# Test coverage
+htmlcov/
+.coverage
 
-# Environments
-.env
-venv/
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints
-
-# Data and model artifacts
+#data 
 data/
-models/

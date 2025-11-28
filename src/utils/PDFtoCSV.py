@@ -93,3 +93,4 @@ class PDFtoCSV:
         tables = self.extract_tables_from_pdf(pdf_path, password)
         clean_df = self.clean_tables(tables)
         return clean_df
+    
