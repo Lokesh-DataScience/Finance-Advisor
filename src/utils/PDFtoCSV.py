@@ -1,53 +1,95 @@
 import pdfplumber
 import pandas as pd
-import glob
-
-pdf_path = "..//data//unlocked.pdf"
-output_folder = "..//data//output_tables"
-
 import os
-os.makedirs(output_folder, exist_ok=True)
 
-all_tables = []
 
-with pdfplumber.open(pdf_path) as pdf:
-    for page_number, page in enumerate(pdf.pages, start=1):
-        tables = page.extract_tables()
+class PDFtoCSV:
+    """
+    Convert password-protected bank statement PDFs to clean CSV format.
+    """
 
-        # Some pages may contain multiple tables
-        for i, table in enumerate(tables):
-            df = pd.DataFrame(table)
-            csv_name = f"{output_folder}/table_page{page_number}_{i+1}.csv"
-            df.to_csv(csv_name, index=False)
-            print(f"Saved: {csv_name}")
-            all_tables.append(df)
+    def __init__(self, output_folder: str = "./data/output_tables"):
+        """
+        Initialize the PDF converter.
+        
+        Args:
+            output_folder: Path to save intermediate CSV files
+        """
+        self.output_folder = output_folder
+        os.makedirs(output_folder, exist_ok=True)
 
-print("\nExtraction complete!")
+    def extract_tables_from_pdf(self, pdf_path: str, password: str = None) -> list:
+        """
+        Extract all tables from a PDF file.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            password: Password for encrypted PDF (optional)
+            
+        Returns:
+            List of DataFrames containing extracted tables
+        """
+        all_tables = []
 
-files = glob.glob("..//data//output_tables/*.csv")
+        try:
+            with pdfplumber.open(pdf_path, password=password) as pdf:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    tables = page.extract_tables()
 
-cleaned_tables = []
+                    if tables:
+                        for i, table in enumerate(tables):
+                            df = pd.DataFrame(table)
+                            csv_name = os.path.join(
+                                self.output_folder,
+                                f"table_page{page_number}_{i+1}.csv"
+                            )
+                            df.to_csv(csv_name, index=False)
+                            all_tables.append(df)
 
-for f in files:
-    df = pd.read_csv(f)
+            return all_tables
 
-    # Standard header format
-    expected_columns = ["Date", "Details", "Ref", "Debit", "Credit", "Balance"]
+        except Exception as e:
+            raise ValueError(f"Error extracting PDF tables: {e}")
 
-    # Rename first row as header if needed
-    if list(df.columns) != expected_columns:
-        df.columns = df.iloc[0]   # first row becomes header
-        df = df[1:]               # drop first row
+    def clean_tables(self, tables: list) -> pd.DataFrame:
+        """
+        Clean and standardize extracted tables.
+        
+        Args:
+            tables: List of DataFrames to clean
+            
+        Returns:
+            Cleaned and combined DataFrame
+        """
+        expected_columns = ["Date", "Details", "Ref", "Debit", "Credit", "Balance"]
+        cleaned_tables = []
 
-    # Drop any rows that exactly match header names
-    df = df[df.iloc[:, 0] != "Date"]  
+        for df in tables:
+            # Rename first row as header if needed
+            if list(df.columns) != expected_columns:
+                df.columns = df.iloc[0]
+                df = df[1:]
 
-    cleaned_tables.append(df)
+            # Drop any rows that exactly match header names
+            df = df[df.iloc[:, 0] != "Date"]
 
-# Combine clean tables
-final_df = pd.concat(cleaned_tables, ignore_index=True)
+            cleaned_tables.append(df)
 
-# Save
-final_df.to_csv("..//data//bank_statement_clean.csv", index=False)
+        # Combine all cleaned tables
+        final_df = pd.concat(cleaned_tables, ignore_index=True)
+        return final_df
 
-print("✔ Cleaned CSV saved!")
+    def convert(self, pdf_path: str, password: str = None) -> pd.DataFrame:
+        """
+        Main conversion method: extract tables from PDF and return cleaned DataFrame.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            password: Password for encrypted PDF (optional)
+            
+        Returns:
+            Cleaned DataFrame with bank statement data
+        """
+        tables = self.extract_tables_from_pdf(pdf_path, password)
+        clean_df = self.clean_tables(tables)
+        return clean_df
